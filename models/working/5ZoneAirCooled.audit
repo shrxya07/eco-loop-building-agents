@@ -16,9 +16,9 @@
  numTableEntry=        4985
  sizeCompSizeTableEntry=         200
  numCompSizeTableEntry=         127
- NumOfRVariable=        6788
- NumOfRVariable(Total)=        6788
- NumOfRVariable(Actual)=         130
+ NumOfRVariable=        6812
+ NumOfRVariable(Total)=        6812
+ NumOfRVariable(Actual)=         134
  NumOfRVariable(Summed)=          56
  NumOfRVariable(Meter)=          56
  NumOfIVariable=         262
