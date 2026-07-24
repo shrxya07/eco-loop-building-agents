@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# EnergyPlus outputs
+out/
+eplusout.*
+*.eso
+*.mtr
+*.mtd
+*.rdd
+*.mdd
+*.eio
+*.err
+*.sql
+*.csv
+*.htm
+*.html
+
+# OS files
+.DS_Store
+Thumbs.db
