@@ -2311,7 +2311,7 @@ Schedule:Compact,
     ThermostatSetpoint:SingleHeating,  !- Control 2 Object Type
     HeatingSetpoint,         !- Control 2 Name
     ThermostatSetpoint:DualSetpoint,  !- Control 3 Object Type
-    DualSetPoint;            !- Control 3 Name
+    DualSetPoint-1;            !- Control 3 Name
 
   ZoneControl:Thermostat,
     SPACE2-1 Control,        !- Name
@@ -2322,7 +2322,7 @@ Schedule:Compact,
     ThermostatSetpoint:SingleHeating,  !- Control 2 Object Type
     HeatingSetpoint,         !- Control 2 Name
     ThermostatSetpoint:DualSetpoint,  !- Control 3 Object Type
-    DualSetPoint;            !- Control 3 Name
+    DualSetPoint-2;            !- Control 3 Name
 
   ZoneControl:Thermostat,
     SPACE3-1 Control,        !- Name
@@ -2333,7 +2333,7 @@ Schedule:Compact,
     ThermostatSetpoint:SingleHeating,  !- Control 2 Object Type
     HeatingSetpoint,         !- Control 2 Name
     ThermostatSetpoint:DualSetpoint,  !- Control 3 Object Type
-    DualSetPoint;            !- Control 3 Name
+    DualSetPoint-3;            !- Control 3 Name
 
   ZoneControl:Thermostat,
     SPACE4-1 Control,        !- Name
@@ -2344,7 +2344,7 @@ Schedule:Compact,
     ThermostatSetpoint:SingleHeating,  !- Control 2 Object Type
     HeatingSetpoint,         !- Control 2 Name
     ThermostatSetpoint:DualSetpoint,  !- Control 3 Object Type
-    DualSetPoint;            !- Control 3 Name
+    DualSetPoint-4;            !- Control 3 Name
 
   ZoneControl:Thermostat,
     SPACE5-1 Control,        !- Name
@@ -2355,7 +2355,7 @@ Schedule:Compact,
     ThermostatSetpoint:SingleHeating,  !- Control 2 Object Type
     HeatingSetpoint,         !- Control 2 Name
     ThermostatSetpoint:DualSetpoint,  !- Control 3 Object Type
-    DualSetPoint;            !- Control 3 Name
+    DualSetPoint-5;            !- Control 3 Name
 
   ThermostatSetpoint:SingleHeating,
     HeatingSetpoint,         !- Name
@@ -2377,6 +2377,30 @@ Schedule:Compact,
     DualSetPoint,            !- Name
     Htg-SetP-Sch,            !- Heating Setpoint Temperature Schedule Name
     Clg-SetP-Sch;            !- Cooling Setpoint Temperature Schedule Name
+  ThermostatSetpoint:DualSetpoint,
+    DualSetPoint-1,
+    Htg-SetP-Sch,
+    Clg-SetP-Sch-1;
+
+ThermostatSetpoint:DualSetpoint,
+    DualSetPoint-2,
+    Htg-SetP-Sch,
+    Clg-SetP-Sch-2;
+
+ThermostatSetpoint:DualSetpoint,
+    DualSetPoint-3,
+    Htg-SetP-Sch,
+    Clg-SetP-Sch-3;
+
+ThermostatSetpoint:DualSetpoint,
+    DualSetPoint-4,
+    Htg-SetP-Sch,
+    Clg-SetP-Sch-4;
+
+ThermostatSetpoint:DualSetpoint,
+    DualSetPoint-5,
+    Htg-SetP-Sch,
+    Clg-SetP-Sch-5;
 
   ZoneHVAC:EquipmentList,
     SPACE1-1 Eq,             !- Name
