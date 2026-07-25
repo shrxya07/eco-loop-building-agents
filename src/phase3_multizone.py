@@ -15,6 +15,7 @@ COOLING_SCHEDULES = {
     "SPACE5-1": "Clg-SetP-Sch-5",
 }
 
+
 api = EnergyPlusAPI()
 state = api.state_manager.new_state()
 
