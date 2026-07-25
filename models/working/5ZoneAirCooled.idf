@@ -3537,6 +3537,10 @@ ThermostatSetpoint:DualSetpoint,
     CoolingPumpAvailSched;   !- Pump Flow Rate Schedule Name
   
   Output:Variable,*,Zone Thermal Comfort Fanger Model PMV,Timestep;
+  Output:Variable,
+    *,
+    Zone People Occupant Count,
+    Timestep;
 
   Output:Variable,*,Site Outdoor Air Drybulb Temperature,hourly;
 

@@ -7,13 +7,20 @@ WEATHER_FILE = r"C:\EnergyPlusV26-1-0\WeatherData\USA_CO_Golden-NREL.724666_TMY3
 OUTPUT_DIR = r"C:\Users\Lalitha\eco_loop\out"
 
 ZONES = ["SPACE1-1", "SPACE2-1", "SPACE3-1", "SPACE4-1", "SPACE5-1"]
-COOLING_SCHEDULE = "Clg-SetP-Sch"  # NOTE: shared across all zones in this stock file
+COOLING_SCHEDULES = {
+    "SPACE1-1": "Clg-SetP-Sch-1",
+    "SPACE2-1": "Clg-SetP-Sch-2",
+    "SPACE3-1": "Clg-SetP-Sch-3",
+    "SPACE4-1": "Clg-SetP-Sch-4",
+    "SPACE5-1": "Clg-SetP-Sch-5",
+}
 
 api = EnergyPlusAPI()
 state = api.state_manager.new_state()
 
-handles = {}  # will hold {zone: {"temp": h, "pmv": h}} plus "cooling": h
-zone_data = {}  # live state, updated every timestep — this is what tools read from
+handles = {}
+zone_data = {}
+zone_decisions = {}
 timestep_counter = 0
 
 def get_handles(s):
@@ -21,36 +28,33 @@ def get_handles(s):
         handles[zone] = {
             "temp": api.exchange.get_variable_handle(s, "Zone Air Temperature", zone),
             "pmv": api.exchange.get_variable_handle(s, "Zone Thermal Comfort Fanger Model PMV", zone + " PEOPLE 1"),
+            "occupancy": api.exchange.get_variable_handle(s, "Zone People Occupant Count", zone),
+            "cooling": api.exchange.get_actuator_handle(s, "Schedule:Compact", "Schedule Value", COOLING_SCHEDULES[zone]),
         }
         if handles[zone]["temp"] == -1:
             raise RuntimeError(f"Temp handle not found for {zone}")
         if handles[zone]["pmv"] == -1:
-            raise RuntimeError(f"PMV handle not found for {zone} — check People object name matches '{zone} PEOPLE 1'")
-    handles["cooling"] = api.exchange.get_actuator_handle(s, "Schedule:Compact", "Schedule Value", COOLING_SCHEDULE)
-    if handles["cooling"] == -1:
-        raise RuntimeError("Cooling schedule handle not found")
+            raise RuntimeError(f"PMV handle not found for {zone}")
+        if handles[zone]["occupancy"] == -1:
+            raise RuntimeError(f"Occupancy handle not found for {zone}")
+        if handles[zone]["cooling"] == -1:
+            raise RuntimeError(f"Cooling actuator not found for {zone}")
     print("All handles acquired successfully.")
 
-# ---------- TOOLS ----------
-
 def get_zone_state(zone):
-    """Tool: read current temp + PMV for one zone."""
     return {
         "zone": zone,
         "temp_c": round(zone_data[zone]["temp"], 2),
         "pmv": round(zone_data[zone]["pmv"], 2),
+        "occupancy": int(zone_data[zone]["occupancy"]),
     }
 
 def get_all_zones_state():
-    """Tool: read current state for all zones at once."""
     return {zone: get_zone_state(zone) for zone in ZONES}
 
-def set_cooling_setpoint(value):
-    """Tool: write a new cooling setpoint (shared schedule — affects all zones in this stock building)."""
-    api.exchange.set_actuator_value(state, handles["cooling"], value)
-    return {"status": "ok", "new_setpoint": value}
-
-# ---------- CONTROL LOOP ----------
+def set_cooling_setpoint(zone, value):
+    api.exchange.set_actuator_value(state, handles[zone]["cooling"], value)
+    return {"zone": zone, "setpoint": value}
 
 def control_callback(s):
     global timestep_counter
@@ -59,26 +63,43 @@ def control_callback(s):
     if not handles:
         get_handles(s)
 
-    # update live zone_data every timestep
     for zone in ZONES:
         zone_data[zone] = {
             "temp": api.exchange.get_variable_value(s, handles[zone]["temp"]),
             "pmv": api.exchange.get_variable_value(s, handles[zone]["pmv"]),
+            "occupancy": api.exchange.get_variable_value(s, handles[zone]["occupancy"]),
         }
 
-    # HARDCODED rule for now (Phase 4 replaces this with the LLM's decision)
-    avg_temp = sum(z["temp"] for z in zone_data.values()) / len(zone_data)
-    if avg_temp > 24.5:
-        set_cooling_setpoint(23.0)
-    elif avg_temp < 23.5:
-        set_cooling_setpoint(26.0)
-    else:
-        set_cooling_setpoint(24.0)
+    for zone in ZONES:
+        pmv = zone_data[zone]["pmv"]
+        occ = zone_data[zone]["occupancy"]
+
+        if occ == 0:
+            setpoint = 26
+            decision = "Energy Saving"
+        elif pmv < -0.7:
+            setpoint = 27
+            decision = "Occupants Cold"
+        elif pmv < -0.3:
+            setpoint = 26
+            decision = "Slightly Cold"
+        elif pmv > 0.8:
+            setpoint = 22
+            decision = "Very Warm"
+        elif pmv > 0.3:
+            setpoint = 23.5
+            decision = "Slightly Warm"
+        else:
+            setpoint = 24.5
+            decision = "Comfort OK"
+
+        set_cooling_setpoint(zone, setpoint)
+        zone_decisions[zone] = {"setpoint": setpoint, "decision": decision}
 
     timestep_counter += 1
     if timestep_counter % 20 == 0:
         state_snapshot = get_all_zones_state()
-        print(f"[{timestep_counter:04d}]", state_snapshot)
+        print(f"[{timestep_counter:04d}]", state_snapshot, "| Decisions:", zone_decisions)
 
 api.runtime.callback_after_predictor_after_hvac_managers(state, control_callback)
 print("Starting EnergyPlus simulation...\n")
