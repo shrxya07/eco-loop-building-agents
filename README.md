@@ -238,7 +238,7 @@ Future work may include:
 - BACnet integration for physical Building Management Systems
 
 ---
-
+DEMO VIDEO IS UPLOADED IN THE MAIN BRANCH OF THIS REPO
 ## Authors
 
 Shreya Mahesh
