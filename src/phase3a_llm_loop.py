@@ -10,7 +10,7 @@ OUTPUT_DIR = r"C:\Users\Lalitha\eco_loop\out\ai_loop"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 ZONES = ["SPACE1-1", "SPACE2-1", "SPACE3-1", "SPACE4-1", "SPACE5-1"]
 COOLING_SCHEDULES = {z: f"Clg-SetP-Sch-{i+1}" for i, z in enumerate(ZONES)}
-LLM_CALL_INTERVAL_TIMESTEPS = 15
+LLM_CALL_INTERVAL_TIMESTEPS = 2
 LLM_MODEL = "llama3.1:8b"
 
 HEATING_SETPOINT_ASSUMED = 22.2   # keep in sync with guardrail
