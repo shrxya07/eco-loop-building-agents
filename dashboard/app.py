@@ -446,7 +446,7 @@ def render_kpi_row(
         ICON_BOLT,
         "Energy Saved",
         f"{saving_pct:.1f}%",
-        f"{energy_saved:.1f} kWh saved",
+        f"{energy_saved:.1f} kWh-equiv saved (elec + gas)",
         COLOR_SAGE,
     ),
 
@@ -454,7 +454,7 @@ def render_kpi_row(
         ICON_BOLT,
         "Cost Saved",
         f"${cost_saved:.2f}",
-        "Estimated electricity savings",
+        "Estimated electricity + gas savings",
         COLOR_SAGE,
     ),
 
@@ -477,27 +477,30 @@ def render_kpi_row(
     st.markdown(_compact_html(f'<div class="kpi-row">{"".join(cards)}</div>'), unsafe_allow_html=True)
 
 
-def render_comparison_card(baseline_kw: float, ai_kw: float):
-    max_kw = max(baseline_kw, ai_kw, 0.01)
-    baseline_pct = min(100, baseline_kw / max_kw * 100)
-    ai_pct = min(100, ai_kw / max_kw * 100)
-    savings_pct = ((baseline_kw - ai_kw) / baseline_kw * 100) if baseline_kw else 0.0
+def render_comparison_card(rows: list[dict], total_baseline: float, total_ai: float):
+    """rows: [{"label", "baseline", "ai", "unit"}, ...] — one bar pair per fuel."""
+    max_val = max([r["baseline"] for r in rows] + [r["ai"] for r in rows] + [0.01])
+    savings_pct = ((total_baseline - total_ai) / total_baseline * 100) if total_baseline else 0.0
     direction = "↓" if savings_pct >= 0 else "↑"
     summary_color = COLOR_SAGE if savings_pct >= 0 else COLOR_TERRACOTTA
 
+    row_html = "".join(f"""
+        <div class="cmp-row">
+            <div class="cmp-row-head"><span>{r['label']} &mdash; Baseline</span><span class="cmp-row-value">{r['baseline']:.1f} {r['unit']}</span></div>
+            <div class="bar-track"><div class="bar-fill" style="width:{min(100, r['baseline'] / max_val * 100):.1f}%; background:{COLOR_TEXT_TERTIARY};"></div></div>
+        </div>
+        <div class="cmp-row">
+            <div class="cmp-row-head"><span>{r['label']} &mdash; AI Runtime</span><span class="cmp-row-value">{r['ai']:.1f} {r['unit']}</span></div>
+            <div class="bar-track"><div class="bar-fill" style="width:{min(100, r['ai'] / max_val * 100):.1f}%; background:{COLOR_STEEL};"></div></div>
+        </div>
+    """ for r in rows)
+
     st.markdown(_compact_html(f"""
     <div class="eco-panel">
-        <div class="cmp-row">
-            <div class="cmp-row-head"><span>Baseline</span><span class="cmp-row-value">{baseline_kw:.1f} kWh</span></div>
-            <div class="bar-track"><div class="bar-fill" style="width:{baseline_pct:.1f}%; background:{COLOR_TEXT_TERTIARY};"></div></div>
-        </div>
-        <div class="cmp-row">
-            <div class="cmp-row-head"><span>AI Runtime</span><span class="cmp-row-value">{ai_kw:.1f} kWh</span></div>
-            <div class="bar-track"><div class="bar-fill" style="width:{ai_pct:.1f}%; background:{COLOR_STEEL};"></div></div>
-        </div>
+        {row_html}
         <div class="cmp-summary">
             <span class="cmp-summary-value" style="color:{summary_color}">{direction} {abs(savings_pct):.1f}%</span>
-            <span class="cmp-summary-label">Energy Saved ({baseline_kw - ai_kw:.1f} kWh)</span>
+            <span class="cmp-summary-label">Total Site Energy Saved ({total_baseline - total_ai:.1f} kWh-equiv &mdash; electricity + gas heating)</span>
         </div>
     </div>
     """), unsafe_allow_html=True)
@@ -703,19 +706,47 @@ live = is_feed_live(AI_LOG_PATH)
 
 render_header(latest, live)
 baseline_df = load_csv(BASELINE_LOG_PATH)
-baseline_energy = baseline_df["facility_kw"].sum()
-ai_energy = ai_df["facility_kw"].sum()
+if baseline_df is not None:
+    baseline_df = baseline_df.iloc[:len(ai_df)]   # <-- align to AI log's progress
 
-energy_saved = baseline_energy - ai_energy
-saving_pct = (energy_saved / baseline_energy) * 100
-# Approximate commercial electricity price
-COST_PER_KWH = 0.12      # USD
 
-# Approximate grid emission factor
-CO2_PER_KWH = 0.40        # kg CO₂
+def _col_sum(df: pd.DataFrame | None, col: str) -> float:
+    if df is None or col not in df.columns:
+        return 0.0
+    return float(df[col].sum())
 
-cost_saved = energy_saved * COST_PER_KWH
-co2_saved = energy_saved * CO2_PER_KWH
+
+# Heating runs on the gas-fired boiler, not the electricity meter — the
+# unoccupied heating setback saves gas, so it has to be tracked and combined
+# with electricity for "Energy Saved" to reflect what the controller is
+# actually doing (see gas_kw column added to both simulation logs).
+baseline_elec_energy = _col_sum(baseline_df, "facility_kw")
+ai_elec_energy = _col_sum(ai_df, "facility_kw")
+baseline_gas_energy = _col_sum(baseline_df, "gas_kw")
+ai_gas_energy = _col_sum(ai_df, "gas_kw")
+
+baseline_total_energy = baseline_elec_energy + baseline_gas_energy
+ai_total_energy = ai_elec_energy + ai_gas_energy
+
+energy_saved = baseline_total_energy - ai_total_energy
+saving_pct = (energy_saved / baseline_total_energy * 100) if baseline_total_energy else 0.0
+
+# Approximate commercial electricity price and grid emission factor
+ELEC_COST_PER_KWH = 0.12   # USD
+ELEC_CO2_PER_KWH = 0.40    # kg CO2
+
+# Approximate natural gas price and combustion emission factor (per kWh-thermal)
+GAS_COST_PER_KWH = 0.035   # USD, ~ $1/therm
+GAS_CO2_PER_KWH = 0.18     # kg CO2
+
+cost_saved = (
+    (baseline_elec_energy - ai_elec_energy) * ELEC_COST_PER_KWH
+    + (baseline_gas_energy - ai_gas_energy) * GAS_COST_PER_KWH
+)
+co2_saved = (
+    (baseline_elec_energy - ai_elec_energy) * ELEC_CO2_PER_KWH
+    + (baseline_gas_energy - ai_gas_energy) * GAS_CO2_PER_KWH
+)
 occupied_timesteps = 0
 comfortable_timesteps = 0
 
@@ -752,14 +783,17 @@ render_decision_panel(priority, build_decision_reason(priority), action_text)
 render_section_title(2, "AI vs Baseline &mdash; Energy Consumption")
 
 if baseline_df is not None:
-    baseline_energy = baseline_df["facility_kw"].sum()
-
-    ai_energy = ai_df["facility_kw"].sum()
-
+    
     render_comparison_card(
-     baseline_energy,
-     ai_energy
+        rows=[
+            {"label": "Electricity", "baseline": baseline_elec_energy, "ai": ai_elec_energy, "unit": "kWh"},
+            {"label": "Heating (Gas)", "baseline": baseline_gas_energy, "ai": ai_gas_energy, "unit": "kWh-equiv"},
+        ],
+        total_baseline=baseline_total_energy,
+        total_ai=ai_total_energy,
     )
+    if baseline_gas_energy == 0.0 and ai_gas_energy == 0.0:
+        st.caption("Gas telemetry not present in these logs yet — rerun the baseline and AI-loop simulations to include heating fuel savings.")
 else:
     st.info(f"Baseline log not found at {BASELINE_LOG_PATH}")
 

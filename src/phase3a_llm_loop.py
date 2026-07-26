@@ -3,6 +3,7 @@ sys.path.insert(0, r"C:\EnergyPlusV26-1-0")
 from pyenergyplus.api import EnergyPlusAPI
 import ollama
 
+                       # safe unoccupied setback, well above freeze risk
 
 IDF_FILE = r"C:\Users\Lalitha\eco_loop\models\working\5ZoneAirCooled.idf"
 WEATHER_FILE = r"C:\EnergyPlusV26-1-0\WeatherData\USA_CO_Golden-NREL.724666_TMY3.epw"
@@ -10,12 +11,13 @@ OUTPUT_DIR = r"C:\Users\Lalitha\eco_loop\out\ai_loop"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 ZONES = ["SPACE1-1", "SPACE2-1", "SPACE3-1", "SPACE4-1", "SPACE5-1"]
 COOLING_SCHEDULES = {z: f"Clg-SetP-Sch-{i+1}" for i, z in enumerate(ZONES)}
-LLM_CALL_INTERVAL_TIMESTEPS = 6
+LLM_CALL_INTERVAL_TIMESTEPS = 15
 LLM_MODEL = "llama3.1:8b"
 
 HEATING_SETPOINT_ASSUMED = 22.2   # keep in sync with guardrail
 PEAK_HOURS = range(14, 18)        # 2pm-6pm, typical summer grid peak — adjust if you have real utility data
-
+HEATING_OCCUPIED_C = HEATING_SETPOINT_ASSUMED   # 22.2, unchanged from today
+HEATING_SETBACK_C = 18.0 
 # Synthetic carbon-intensity profile (gCO2/kWh) by hour — placeholder until/unless you have a real grid API.
 # Pattern: higher in evening (gas peaker plants), lower overnight (baseload/nuclear/wind).
 CARBON_INTENSITY_BY_HOUR = {
@@ -59,6 +61,7 @@ def get_handles(state):
         handles["pmv"][z] = api.exchange.get_variable_handle(state, "Zone Thermal Comfort Fanger Model PMV", f"{z} PEOPLE 1")
         handles["occupancy"][z] = api.exchange.get_variable_handle(state, "Zone People Occupant Count", z)
         handles["cooling_actuator"][z] = api.exchange.get_actuator_handle(state, "Schedule:Compact", "Schedule Value", COOLING_SCHEDULES[z])
+        handles["heating_actuator"] = api.exchange.get_actuator_handle(state, "Schedule:Compact", "Schedule Value", "Htg-SetP-Sch")
         for key, h in [("temp", handles["temp"][z]), ("pmv", handles["pmv"][z]),
                        ("occupancy", handles["occupancy"][z]), ("actuator", handles["cooling_actuator"][z])]:
             if h == -1:
@@ -67,6 +70,12 @@ def get_handles(state):
     handles["facility_electricity"] = api.exchange.get_variable_handle(state, "Facility Total Electricity Demand Rate", "Whole Building")
     if handles["facility_electricity"] == -1:
         raise RuntimeError("Facility electricity demand handle not found")
+    # Heating runs on the gas-fired boiler (Boiler:HotWater "Central Boiler", fuel
+    # NaturalGas) — the heating setback below saves gas, not electricity, so it
+    # needs its own meter to show up in the energy comparison at all.
+    handles["boiler_gas"] = api.exchange.get_variable_handle(state, "Boiler NaturalGas Rate", "Central Boiler")
+    if handles["boiler_gas"] == -1:
+        raise RuntimeError("Boiler natural gas rate handle not found")
 
 MIN_DEADBAND = 2.0                 # degrees C between heating and cooling setpoints
 HEATING_SETPOINT_ASSUMED = 22.2    # confirm this matches Htg-SetP-Sch in the working IDF
@@ -75,7 +84,7 @@ import csv
 import os
 
 GUARDRAIL_LOG_PATH = os.path.join(OUTPUT_DIR, "guardrail_events.csv")
-MAX_SAFE_PMV = 1.5   # absolute PMV bound for occupied zones — beyond this is a real comfort violation
+MAX_SAFE_PMV = 0.5   # absolute PMV bound for occupied zones — beyond this is a real comfort violation
 
 def log_guardrail_event(timestep, zone, reason, proposed, applied, zone_state):
     file_exists = os.path.isfile(GUARDRAIL_LOG_PATH)
@@ -119,7 +128,13 @@ def guardrail(zone, setpoint, zone_state, timestep, building_context):
             log_guardrail_event(timestep, zone, reason, setpoint, last_known_good_setpoints[zone], zone_state)
             return last_known_good_setpoints[zone]
 
-    
+    if zone_state["occupancy"] > 0:
+     if zone_state["pmv"] < -0.5:
+        return max(setpoint, zone_state["temp_c"] + 1.0)
+     if zone_state["pmv"] > 0.5:
+        return min(setpoint, zone_state["temp_c"] - 1.0)
+    # comfortable: nudge setpoint up to cut cooling energy, capped at MAX_SP
+     return min(MAX_SP, max(setpoint, zone_state["temp_c"] + 0.5))
 
     return setpoint
 
@@ -177,18 +192,24 @@ def control_callback(state):
 
     current_hour = api.exchange.hour(state)
     current_time = (
-    api.exchange.day_of_month(state),
-    api.exchange.hour(state),
-    api.exchange.minutes(state),
-)
+        api.exchange.day_of_month(state),
+        api.exchange.hour(state),
+        api.exchange.minutes(state),
+    )
 
-    
     is_peak = current_hour in PEAK_HOURS
     carbon_intensity = CARBON_INTENSITY_BY_HOUR.get(current_hour, 400)
     facility_kw = round(
         api.exchange.get_variable_value(
             state,
             handles["facility_electricity"]
+        ) / 1000,
+        2,
+    )
+    gas_kw = round(
+        api.exchange.get_variable_value(
+            state,
+            handles["boiler_gas"]
         ) / 1000,
         2,
     )
@@ -226,51 +247,71 @@ def control_callback(state):
             proposed = raw_decisions.get(z)
 
             final = guardrail(
-    z,
-    proposed,
-    zone_states[z],
-    timestep_counter,
-    building_context,   # <-- pass it in here
-)
+                z,
+                proposed,
+                zone_states[z],
+                timestep_counter,
+                building_context,   # <-- pass it in here
+            )
 
             last_known_good_setpoints[z] = final
 
             print(
-                f"[{timestep_counter:04d}] "
-                f"{z} | hour={current_hour} "
-                f"| proposed={proposed} "
-                f"| applied={final}"
+                f"[{timestep_counter:04d}] {z} "
+                f"| Temp={zone_states[z]['temp_c']:.2f} "
+                f"| PMV={zone_states[z]['pmv']:.2f} "
+                f"| Occ={zone_states[z]['occupancy']} "
+                f"| Proposed={proposed} "
+                f"| Applied={final}"
             )
 
+    applied_setpoints = {}
     for z in ZONES:
+        if zone_states[z]["occupancy"] == 0:
+            applied_setpoints[z] = 28.0   # deep setback when empty — matches guardrail's own 20-28 bound
+        else:
+            applied_setpoints[z] = last_known_good_setpoints[z]
+
+        print(
+            f"[ACTUATOR] {z} | "
+            f"Temp={zone_states[z]['temp_c']:.2f} | "
+            f"PMV={zone_states[z]['pmv']:.2f} | "
+            f"Occ={zone_states[z]['occupancy']} | "
+            f"Setpoint={applied_setpoints[z]:.1f}"
+        )
         api.exchange.set_actuator_value(
             state,
             handles["cooling_actuator"][z],
-            last_known_good_setpoints[z],
+            applied_setpoints[z],
         )
+    any_occupied = any(zone_states[z]["occupancy"] > 0 for z in ZONES)
+    heating_setpoint = HEATING_OCCUPIED_C if any_occupied else HEATING_SETBACK_C
+    api.exchange.set_actuator_value(state, handles["heating_actuator"], heating_setpoint)
     row = {
-    "callback": timestep_counter,
-    "day": api.exchange.day_of_month(state),
-    "hour": api.exchange.hour(state),
-    "minute": api.exchange.minutes(state),
-    "facility_kw": facility_kw,
-}
+        "callback": timestep_counter,
+        "day": api.exchange.day_of_month(state),
+        "hour": api.exchange.hour(state),
+        "minute": api.exchange.minutes(state),
+        "facility_kw": facility_kw,
+        "gas_kw": gas_kw,
+    }
     for z in ZONES:
         row[f"{z}_temp_c"] = zone_states[z]["temp_c"]
         row[f"{z}_pmv"] = zone_states[z]["pmv"]
         row[f"{z}_occupancy"] = zone_states[z]["occupancy"]
-        row[f"{z}_setpoint_applied"] = last_known_good_setpoints[z]
+        row[f"{z}_setpoint_applied"] = applied_setpoints[z]
+
     file_exists = os.path.isfile(COMPARISON_LOG_PATH)
 
     with open(COMPARISON_LOG_PATH, "a", newline="") as f:
-       writer = csv_module.DictWriter(f, fieldnames=row.keys())
+        writer = csv_module.DictWriter(f, fieldnames=row.keys())
 
-       if not file_exists:
-          writer.writeheader()
+        if not file_exists:
+            writer.writeheader()
 
-       writer.writerow(row)
-       f.flush()
-       os.fsync(f.fileno())
+        writer.writerow(row)
+        f.flush()
+        os.fsync(f.fileno())
 
     timestep_counter += 1
 

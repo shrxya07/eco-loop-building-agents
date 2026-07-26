@@ -21,7 +21,7 @@ LOG_PATH = os.path.join(OUTPUT_DIR, "baseline_log.csv")
 api = EnergyPlusAPI()
 state = api.state_manager.new_state()
 
-handles = {"temp": {}, "pmv": {}, "occupancy": {}, "facility_electricity": None}
+handles = {"temp": {}, "pmv": {}, "occupancy": {}, "facility_electricity": None, "boiler_gas": None}
 timestep_counter = 0
 log_rows = []
 
@@ -36,6 +36,11 @@ def get_handles(state):
     handles["facility_electricity"] = api.exchange.get_variable_handle(state, "Facility Total Electricity Demand Rate", "Whole Building")
     if handles["facility_electricity"] == -1:
         raise RuntimeError("Facility electricity demand handle not found")
+    # Heating runs on the gas-fired boiler (Boiler:HotWater "Central Boiler", fuel
+    # NaturalGas) — tracked separately since it isn't on the electricity meter at all.
+    handles["boiler_gas"] = api.exchange.get_variable_handle(state, "Boiler NaturalGas Rate", "Central Boiler")
+    if handles["boiler_gas"] == -1:
+        raise RuntimeError("Boiler natural gas rate handle not found")
     print("All handles acquired successfully (baseline, read-only).")
 
 def log_callback(state):
@@ -49,12 +54,14 @@ def log_callback(state):
    
 
     facility_kw = round(api.exchange.get_variable_value(state, handles["facility_electricity"]) / 1000, 3)
+    gas_kw = round(api.exchange.get_variable_value(state, handles["boiler_gas"]) / 1000, 3)
     row = {
     "callback": timestep_counter,
     "day": api.exchange.day_of_month(state),
     "hour": api.exchange.hour(state),
     "minute": api.exchange.minutes(state),
     "facility_kw": facility_kw,
+    "gas_kw": gas_kw,
 }
     for z in ZONES:
         row[f"{z}_temp_c"] = round(api.exchange.get_variable_value(state, handles["temp"][z]), 2)
