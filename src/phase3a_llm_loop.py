@@ -12,7 +12,7 @@ ZONES = ["SPACE1-1", "SPACE2-1", "SPACE3-1", "SPACE4-1", "SPACE5-1"]
 COOLING_SCHEDULES = {z: f"Clg-SetP-Sch-{i+1}" for i, z in enumerate(ZONES)}
 LLM_CALL_INTERVAL_TIMESTEPS = 15
 LLM_MODEL = "llama3.1:8b"
-last_ai_summary = ""
+
 HEATING_SETPOINT_ASSUMED = 22.2   # keep in sync with guardrail
 PEAK_HOURS = range(14, 18)        # 2pm-6pm, typical summer grid peak — adjust if you have real utility data
 
@@ -25,6 +25,8 @@ CARBON_INTENSITY_BY_HOUR = {
 }
 import csv as csv_module
 COMPARISON_LOG_PATH = os.path.join(OUTPUT_DIR, "ai_loop_log.csv")
+if os.path.exists(COMPARISON_LOG_PATH):
+    os.remove(COMPARISON_LOG_PATH)
 comparison_log_rows = []
 api = EnergyPlusAPI()
 state = api.state_manager.new_state()
@@ -124,88 +126,38 @@ def guardrail(zone, setpoint, zone_state, timestep, building_context):
 
 
 def call_llm_for_decisions(zone_states, building_context):
-    prompt = f"""
-You control HVAC cooling for five zones.
-
-Building:
-{json.dumps(building_context)}
-
-Zones:
-{json.dumps(zone_states)}
-
-Return ONLY valid JSON in this exact format:
-
-{{
-  "setpoints": {{
-    "SPACE1-1": 24.5,
-    "SPACE2-1": 25.0,
-    "SPACE3-1": 24.8,
-    "SPACE4-1": 26.2,
-    "SPACE5-1": 25.4
-  }},
-  "summary": "One sentence explaining the strategy."
-}}
-
-Rules:
-- One setpoint for every zone.
-- Minimum cooling setpoint = {building_context["minimum_allowed_cooling_setpoint_c"]}.
-- Maximum cooling setpoint = 28.
-- Different zones may have different setpoints.
-- Output ONLY JSON.
-"""
-
+    prompt = (
+        "You are an HVAC optimization agent for a 5-zone building.\n\n"
+        f"Building context:\n{json.dumps(building_context, indent=2)}\n\n"
+        f"Zone states:\n{json.dumps(zone_states, indent=2)}\n\n"
+        "Decide a cooling setpoint (Celsius, one decimal) for EACH zone based on ITS OWN temp_c, pmv, and occupancy above.\n"
+        "Different zones have different conditions, so their setpoints should generally differ too.\n"
+        "If a zone's PMV is already between -0.5 and 0.5 (comfortable), pick a setpoint 1-2C WARMER than the current temp_c to save energy, rather than the coolest option.\n"
+        f"Every setpoint must be >= {building_context['minimum_allowed_cooling_setpoint_c']} and <= 28.\n\n"
+        "Respond with ONLY a JSON object mapping each zone name to a number — no explanation, no markdown, no example text.\n"
+        "The keys must be exactly: SPACE1-1, SPACE2-1, SPACE3-1, SPACE4-1, SPACE5-1"
+    )
     try:
         response = ollama.chat(
             model=LLM_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are an HVAC optimization agent. "
-                        "Always respond ONLY with valid JSON."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": prompt,
-                },
-            ],
+            messages=[{"role": "user", "content": prompt}],
+            format="json",
             stream=False,
             options={
                 "temperature": 0,
+                "num_predict": 512,
+                "num_ctx": 4096,
             },
         )
-
         content = response.message.content
-
-        # print("\n========== RAW LLM RESPONSE ==========")
-        # print(repr(content))
-        # print("======================================")
-
+        print(f"[DEBUG] Raw JSON content: {content}")
         parsed = json.loads(content)
-
-        # print("[DEBUG] Parsed JSON:", parsed)
-        # print("[DEBUG] Keys:", list(parsed.keys()))
-
-        global last_ai_summary
-
-        last_ai_summary = parsed.get("summary", "")
-        print(f"[AI SUMMARY] {last_ai_summary}")
-
-        setpoints = parsed.get("setpoints", {})
-        # print("[DEBUG] setpoints =", setpoints)
-
         decisions = {}
-
         for z in ZONES:
-            val = setpoints.get(z)
-            # print(f"[DEBUG] {z} -> {val}")
-
+            val = parsed.get(z)
             if val is not None:
                 decisions[z] = float(val)
-
         return decisions
-
     except Exception as e:
         print(f"[LLM ERROR] {e}")
         return {}
@@ -302,14 +254,24 @@ def control_callback(state):
     "hour": api.exchange.hour(state),
     "minute": api.exchange.minutes(state),
     "facility_kw": facility_kw,
-    "ai_summary": last_ai_summary,
 }
     for z in ZONES:
         row[f"{z}_temp_c"] = zone_states[z]["temp_c"]
         row[f"{z}_pmv"] = zone_states[z]["pmv"]
         row[f"{z}_occupancy"] = zone_states[z]["occupancy"]
         row[f"{z}_setpoint_applied"] = last_known_good_setpoints[z]
-    comparison_log_rows.append(row)
+    file_exists = os.path.isfile(COMPARISON_LOG_PATH)
+
+    with open(COMPARISON_LOG_PATH, "a", newline="") as f:
+       writer = csv_module.DictWriter(f, fieldnames=row.keys())
+
+       if not file_exists:
+          writer.writeheader()
+
+       writer.writerow(row)
+       f.flush()
+       os.fsync(f.fileno())
+
     timestep_counter += 1
 
 api.runtime.callback_end_zone_timestep_after_zone_reporting(state, control_callback)
@@ -317,10 +279,4 @@ print("Starting EnergyPlus simulation with LLM control loop...\n")
 result = api.runtime.run_energyplus(state, ["-w", WEATHER_FILE, "-d", OUTPUT_DIR, IDF_FILE])
 print("\nSimulation finished.")
 print("Completed successfully." if result == 0 else f"EnergyPlus exited with code {result}")
-if comparison_log_rows:
-    with open(COMPARISON_LOG_PATH, "w", newline="") as f:
-        writer = csv_module.DictWriter(f, fieldnames=list(comparison_log_rows[0].keys()))
-        writer.writeheader()
-        writer.writerows(comparison_log_rows)
-    print(f"Wrote {len(comparison_log_rows)} rows to {COMPARISON_LOG_PATH}")
 api.state_manager.delete_state(state)

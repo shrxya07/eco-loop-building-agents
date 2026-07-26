@@ -13,6 +13,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
+from pandas.errors import EmptyDataError
 
 
 def _compact_html(html: str) -> str:
@@ -84,10 +85,10 @@ FONT_MONO = "Consolas, 'Cascadia Mono', 'Courier New', monospace"
 # light panel surface; reused at low opacity as the floorplan tint on the
 # dark twin canvas)
 COMFORT_BANDS = [
-    (-1.0, "Cold", "#3E5266"),
-    (-0.3, "Cool", "#5C7A8C"),
-    (0.3, "Comfortable", "#71835F"),
-    (1.0, "Warm", "#C0865B"),
+    (-0.2, "Cold", "#3E5266"),
+    (-0.05, "Cool", "#5C7A8C"),
+    (0.05, "Comfortable", "#71835F"),
+    (0.2, "Warm", "#C0865B"),
     (float("inf"), "Hot", "#B5623F"),
 ]
 
@@ -103,11 +104,14 @@ ICON_SNOWFLAKE = """<svg width="16" height="16" viewBox="0 0 24 24" fill="none" 
 # Data loading
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=2)
-def load_csv(path: Path) -> pd.DataFrame | None:
+def load_csv(path: Path):
     if not path.exists():
         return None
-    return pd.read_csv(path, encoding="latin-1")
 
+    try:
+        return pd.read_csv(path, encoding="latin-1")
+    except EmptyDataError:
+        return None
 
 @st.cache_data
 def load_svg_template(path: Path) -> str:
@@ -162,11 +166,21 @@ def find_guardrail_action(guardrail_df: pd.DataFrame | None, timestep, zone: str
     )
 
 
-def build_decision_reason(zone_rec: dict) -> str:
-    occ_text = "zone currently occupied" if zone_rec["occupied"] else "zone currently unoccupied"
+def build_decision_reason(zone_rec: dict):
+    if zone_rec["occupied"]:
+        return (
+            f"{zone_rec['room']} is occupied with a PMV of "
+            f"{zone_rec['pmv']:+.2f}. The controller evaluated occupant "
+            f"comfort against HVAC energy consumption and selected a "
+            f"{zone_rec['setpoint']:.1f}°C setpoint to maintain comfort "
+            f"while minimizing unnecessary cooling."
+        )
+
     return (
-        f"PMV {zone_rec['pmv']:+.2f} — {zone_rec['comfort_label'].lower()} conditions "
-        f"({occ_text})."
+        f"{zone_rec['room']} is currently unoccupied. The controller "
+        f"maintains an energy-efficient setpoint of "
+        f"{zone_rec['setpoint']:.1f}°C while ensuring the zone remains "
+        f"within acceptable thermal limits."
     )
 
 
@@ -374,8 +388,12 @@ def inject_theme():
 def render_header(latest: pd.Series, live: bool):
     now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     sim_time = f"Day {int(latest['day'])} · {int(latest['hour']):02d}:{int(latest['minute']) % 60:02d}"
-    live_class = "on" if live else "off"
-    live_text = "LIVE" if live else "IDLE"
+    if live:
+     live_class = "on"
+     live_text = "LIVE"
+    else:
+     live_class = "off"
+     live_text = "SIMULATION COMPLETE"
     st.markdown(_compact_html(f"""
     <div class="eco-header">
         <div>
@@ -553,6 +571,7 @@ def build_floorplan_svg(template: str, zone_records: list[dict]) -> str:
         for geom, rec in zip(rects, zone_records)
     )
     svg = svg.replace("><defs>", f">{bg_markup}<defs>", 1)
+    print("><defs>" in svg_template)
     return svg
 
 
@@ -571,11 +590,11 @@ def render_telemetry_row(latest: pd.Series, zone_records: list[dict]):
     avg_pmv = sum(r["pmv"] for r in zone_records) / len(zone_records)
     occupied = sum(1 for r in zone_records if r["occupied"])
     cooling_zones = sum(1 for r in zone_records if r["temp"] > r["setpoint"] + 0.2)
-    telemetry_card(ICON_CPU,"Controller","ACTIVE" if live else "IDLE",
-)
+    
+
 
     cards = [
-        telemetry_card(ICON_THERMO, "Outdoor Temp", "—", dim=True),
+        telemetry_card(ICON_CPU,"Controller","ACTIVE" if live else "IDLE"),
         telemetry_card(ICON_BOLT, "HVAC Power", f"{latest['facility_kw']:.2f} kW"),
         telemetry_card(ICON_THERMO, "Avg Zone Temp", f"{avg_temp:.1f}°C"),
         telemetry_card(ICON_SNOWFLAKE, "Cooling Demand", f"{cooling_zones} / {len(zone_records)} zones"),
@@ -583,7 +602,7 @@ def render_telemetry_row(latest: pd.Series, zone_records: list[dict]):
         telemetry_card(ICON_USERS, "Occupancy", f"{occupied} / {len(zone_records)} zones"),
     ]
     st.markdown(_compact_html(f'<div class="tel-row">{"".join(cards)}</div>'), unsafe_allow_html=True)
-    st.caption("Outdoor Temperature is not currently instrumented in the EnergyPlus runtime export.")
+    
 
 def render_zone_table(zone_records):
     df = pd.DataFrame([
@@ -623,17 +642,42 @@ def render_power_timeline(df: pd.DataFrame):
         hovertemplate="Current: %{y:.2f} kW<extra></extra>",
     ))
     fig.update_layout(
-        height=320,
-        margin=dict(l=10, r=10, t=10, b=10),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(family=FONT_UI, color=COLOR_TEXT_SECONDARY, size=12),
-        showlegend=True,
-        legend=dict(orientation="h", yanchor="bottom", y=1.0, xanchor="left", x=0, bgcolor="rgba(0,0,0,0)"),
-        xaxis=dict(title="Simulation Time Step", gridcolor=COLOR_BORDER, zeroline=False),
-        yaxis=dict(title="Power (kW)", gridcolor=COLOR_BORDER, zeroline=False),
-        hovermode="x unified",
-    )
+    height=320,
+    margin=dict(l=10, r=10, t=10, b=10),
+    paper_bgcolor="rgba(0,0,0,0)",
+    plot_bgcolor="rgba(0,0,0,0)",
+    font=dict(
+        family=FONT_UI,
+        color=COLOR_TEXT_SECONDARY,
+        size=12
+    ),
+    showlegend=True,
+    legend=dict(
+        orientation="h",
+        yanchor="bottom",
+        y=1.0,
+        xanchor="left",
+        x=0,
+        bgcolor="rgba(0,0,0,0)",
+        font=dict(
+            color=COLOR_TEXT_PRIMARY,
+            size=12
+        )
+    ),
+    xaxis=dict(
+        title="Simulation Time Step",
+        gridcolor=COLOR_BORDER,
+        zeroline=False,
+        color=COLOR_TEXT_PRIMARY
+    ),
+    yaxis=dict(
+        title="Power (kW)",
+        gridcolor=COLOR_BORDER,
+        zeroline=False,
+        color=COLOR_TEXT_PRIMARY
+    ),
+    hovermode="x unified",
+)
     st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})
 
 
@@ -646,7 +690,7 @@ inject_theme()
 
 ai_df = load_csv(AI_LOG_PATH)
 if ai_df is None:
-    st.error(f"Cannot find {AI_LOG_PATH}")
+    st.info("Waiting for live simulation data...")
     st.stop()
 
 occupied_rows = ai_df[
@@ -719,7 +763,13 @@ if baseline_df is not None:
 else:
     st.info(f"Baseline log not found at {BASELINE_LOG_PATH}")
 
-
+for z in zone_records:
+    print(
+        z["room"],
+        "PMV:", z["pmv"],
+        "Band:", z["comfort_label"],
+        "Color:", z["comfort_color"],
+    )
 
 render_section_title(3, "Building Digital Twin")
 render_legend()
@@ -732,3 +782,5 @@ render_telemetry_row(latest, zone_records)
 
 render_section_title(5, "Facility Power Timeline")
 render_power_timeline(ai_df)
+with open("debug_floorplan.svg", "w", encoding="utf-8") as f:
+    f.write(floorplan_svg)
